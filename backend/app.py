@@ -30,7 +30,7 @@ class CNN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-# ✅ EXACT class order used during training (38 classes)
+# EXACT class order used during training (38 classes)
 CLASSES = [
     'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
     'Blueberry___healthy', 'Cherry_(including_sour)___Powdery_mildew', 'Cherry_(including_sour)___healthy',
