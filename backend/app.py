@@ -1,40 +1,29 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from PIL import Image
-from io import BytesIO
-import base64
 import torch
 import torch.nn as nn
 from torchvision import transforms, datasets
 import os
+import pickle
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
+# ---------------- APP ----------------
 app = Flask(__name__)
 CORS(app)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ---------- MODEL (MATCHES TRAINING) ----------
+# ---------------- IMAGE MODEL ----------------
 class MyCNNModel(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
-
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(3, 16, 3, 1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-
-            nn.Conv2d(16, 32, 3, 1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-
-            nn.Conv2d(32, 64, 3, 1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2)
+        self.conv = nn.Sequential(
+            nn.Conv2d(3, 16, 3, 1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, 3, 1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, 1), nn.ReLU(), nn.MaxPool2d(2),
         )
-
         self.gap = nn.AdaptiveAvgPool2d((7, 7))
-
-        self.fc_layers = nn.Sequential(
+        self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(64 * 7 * 7, 256),
             nn.ReLU(),
@@ -43,53 +32,63 @@ class MyCNNModel(nn.Module):
         )
 
     def forward(self, x):
-        x = self.conv_layers(x)
-        x = self.gap(x)
-        return self.fc_layers(x)
+        return self.fc(self.gap(self.conv(x)))
 
-# ---------- LOAD CLASSES ----------
+# ---------------- LOAD IMAGE MODEL ----------------
 DATASET_PATH = r"C:\plant_dataset\New Plant Diseases Dataset(Augmented)\New Plant Diseases Dataset(Augmented)\train"
 classes = datasets.ImageFolder(DATASET_PATH).classes
 
-model = MyCNNModel(len(classes))
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "plantdoc_cnn.pth")
-
-model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-model.to(device)
-model.eval()
+image_model = MyCNNModel(len(classes))
+image_model.load_state_dict(torch.load("plantdoc_cnn.pth", map_location=device))
+image_model.to(device).eval()
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor()
 ])
 
-# ---------- ROUTES ----------
+# ---------------- LOAD TEXT MODEL ----------------
+tokenizer = AutoTokenizer.from_pretrained("plant_disease_text_model")
+text_model = AutoModelForSequenceClassification.from_pretrained(
+    "plant_disease_text_model"
+).to(device).eval()
+
+with open("label_encoder.pkl", "rb") as f:
+    label_encoder = pickle.load(f)
+
+# ---------------- ROUTE ----------------
 @app.route("/predict", methods=["POST"])
 def predict():
-    image = request.files["image"]
-    img = Image.open(image).convert("RGB")
+    if "image" not in request.files:
+        return jsonify({"error": "Image is required"}), 400
 
-    tensor = transform(img).unsqueeze(0).to(device)
+    img = Image.open(request.files["image"]).convert("RGB")
+    img_tensor = transform(img).unsqueeze(0).to(device)
+
     with torch.no_grad():
-        pred = model(tensor).argmax(1).item()
+        img_pred = image_model(img_tensor).argmax(1).item()
 
-    buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    img_b64 = base64.b64encode(buffer.getvalue()).decode()
+    image_disease = classes[img_pred]
+
+    # Optional text
+    text = request.form.get("text", "").strip()
+    text_disease = None
+
+    if text:
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(device)
+        with torch.no_grad():
+            logits = text_model(**inputs).logits
+        text_disease = label_encoder.inverse_transform([logits.argmax(1).item()])[0]
+
+    final_disease = image_disease
+    note = "Prediction based on image"
+
+    if text_disease:
+        note = "Image and text agree" if text_disease == image_disease else "Image prioritized over text"
 
     return jsonify({
-        "disease": classes[pred],
-        "info": "This disease affects plant health. Early treatment helps reduce damage.",
-        "image": img_b64
-    })
-
-@app.route("/chat", methods=["POST"])
-def chat():
-    msg = request.json["message"]
-    return jsonify({
-        "reply": f"🤖 Dummy response for: {msg}"
+        "final_disease": final_disease,
+        "note": note
     })
 
 if __name__ == "__main__":
