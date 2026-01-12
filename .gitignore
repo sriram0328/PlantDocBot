@@ -1,1 +1,9 @@
 node_modules/
+
+# ML models
+*.safetensors
+*.pt
+*.h5
+*.onnx
+*.ckpt
+*.bin
